@@ -5,6 +5,9 @@ import (
 	"crypto/tls"
 	"log"
 	"net"
+	"io"
+	"encoding/binary"
+	"bytes"
 )
 
 // Client holds info about connection
@@ -19,21 +22,54 @@ type server struct {
 	config                   *tls.Config
 	onNewClientCallback      func(c *Client)
 	onClientConnectionClosed func(c *Client, err error)
-	onNewMessage             func(c *Client, message string)
+	onNewMessage             func(c *Client, message []byte)
 }
 
 // Read client data from channel
-func (c *Client) listen() {
+func (c *Client) listen(packge_type string) {
 	c.Server.onNewClientCallback(c)
 	reader := bufio.NewReader(c.conn)
-	for {
-		message, err := reader.ReadString('\n')
-		if err != nil {
-			c.conn.Close()
-			c.Server.onClientConnectionClosed(c, err)
-			return
+	if packge_type == "by_str" {
+		for {
+			message, err := reader.ReadBytes('\n')
+			if err != nil {
+				c.conn.Close()
+				c.Server.onClientConnectionClosed(c, err)
+				return
+			}
+			c.Server.onNewMessage(c, message)
 		}
-		c.Server.onNewMessage(c, message)
+	}else if packge_type == "lv" {
+		for {
+			//1 先读出流中的head部分
+			headData := make([]byte, 4)
+			_, err := io.ReadFull(c.conn, headData) //ReadFull 会把msg填充满为止
+			if err != nil {
+				log.Fatalln("read head error")
+				break
+			}
+
+			
+			var len int32
+			buf := bytes.NewBuffer(headData)
+			err = binary.Read(buf, binary.BigEndian, &len)
+			if err != nil {
+				log.Fatalln("binary.Read failed:", err)
+				break
+			}
+			log.Printf("recv head , datalen:%d", len)
+
+			body_data := make([]byte, len)
+			n := 0
+			n, err = io.ReadFull(c.conn, body_data) //ReadFull 会把msg填充满为止
+			if err != nil {
+				log.Fatalln("read body error")
+				break
+			}
+			log.Printf("recv data, len:%d", n)
+
+			c.Server.onNewMessage(c, body_data)
+		}
 	}
 }
 
@@ -71,12 +107,12 @@ func (s *server) OnClientConnectionClosed(callback func(c *Client, err error)) {
 }
 
 // Called when Client receives new message
-func (s *server) OnNewMessage(callback func(c *Client, message string)) {
+func (s *server) OnNewMessage(callback func(c *Client, message []byte)) {
 	s.onNewMessage = callback
 }
 
 // Listen starts network server
-func (s *server) Listen() {
+func (s *server) Listen(packge_type string) {
 	var listener net.Listener
 	var err error
 	if s.config == nil {
@@ -95,7 +131,7 @@ func (s *server) Listen() {
 			conn:   conn,
 			Server: s,
 		}
-		go client.listen()
+		go client.listen(packge_type)
 	}
 }
 
@@ -107,7 +143,7 @@ func New(address string) *server {
 	}
 
 	server.OnNewClient(func(c *Client) {})
-	server.OnNewMessage(func(c *Client, message string) {})
+	server.OnNewMessage(func(c *Client, message []byte) {})
 	server.OnClientConnectionClosed(func(c *Client, err error) {})
 
 	return server
